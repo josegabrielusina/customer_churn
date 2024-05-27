@@ -1,0 +1,463 @@
+---
+title: "Final_Project"
+author: "Jose Gabriel Usina Mogro"
+date: "2023-11-27"
+output: 
+  html_document:
+    theme: united
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    number_sections: TRUE
+    toc_float:
+      smooth_scroll: FALSE
+      collapsed: FALSE
+---
+
+```{r warning=FALSE, include=FALSE}
+library(ggplot2)
+library(rpart.plot)
+library(ggplot2)
+library(pROC)
+library(randomForest)
+library(dplyr)
+library(RColorBrewer)
+library(MASS)
+library(viridis)
+```
+
+# Reading DATA
+
+First thing we are going to do is to load our data and have a global
+visualization from it.
+
+```{r}
+customer<-read.csv("Churn_Modelling.csv")
+```
+
+We called the dataset `customer`
+
+We want to know how is our data structured and see what we can do with
+it
+
+```{r}
+str(customer)
+summary(customer)
+```
+
+For this project, the target variable will be Exited. We want to predict
+if a Customer will leave the bank based on his data.
+
+# Data Cleaning
+
+As we can see in the previous step, we can see that we have some
+variables that are not helpful for our prediction. This columns are:
+
+-   `RowNumber`
+-   `CustomerId`
+-   `Surname`
+
+```{r}
+customer<-dplyr::select(customer,-c("RowNumber","CustomerId","Surname"))
+head(customer,10)
+```
+
+With the columns dropped, now we have to verify that all of the data is
+in the right data type. We are going to do two changes here:
+
+-   `Exited`: Since we are planning to use a random forest, this
+    variable has to be a factor, so the model can run properly
+
+-   `Geography`: We want to change this variable to a factor, since we
+    have different values for country and we want to add it to the
+    model.
+
+```{r}
+customer$Exited<-as.factor(customer$Exited)
+customer$Geography<-as.factor(customer$Geography)
+```
+
+After all the cleaning this how our data will look
+
+```{r}
+str(customer)
+summary(customer)
+```
+
+# Data Visualization
+
+In order to get some insights about our data before build the models, it
+is important to look at some visualizations of our data.
+
+## Active Members vs Exited
+
+```{r}
+ggplot(data=customer)+
+  geom_bar(mapping = aes(x=IsActiveMember,fill=Exited),position="fill")+
+  labs(x="Customer is Active",y="Percentage")+
+  ggtitle("Customer Is Active vs Exited")+
+  scale_fill_viridis_d(labels = c("Not Exited", "Exited"))
+```
+
+It was important to see this plot, because we didn't want to have
+complete separation. It would be easier to say taht every Customer that
+is not active, will be exited, but this is not the case.
+
+## Balance
+
+```{r warning=FALSE}
+ggplot(data=customer)+
+  geom_histogram(aes(x=Balance,fill=Exited),position = "fill",bins=30)+
+  labs(x="Account Balance",y="Proportion")+
+  ggtitle("Distribution of Account Balance by Exit Status")+
+  scale_fill_viridis_d(labels = c("Not Exited", "Exited"))
+```
+
+## Demographic Data
+
+```{r}
+ggplot(data = customer, aes(x = Geography, y = Age, fill = Gender)) +
+  geom_boxplot() +
+  labs(x = "Geography", y = "Age", fill = "Gender") +
+  scale_fill_viridis_d(name = "Gender") + 
+  facet_wrap(~Exited, scales = "free", labeller = labeller(Exited = c("0" = "Not Exited", "1" = "Exited"))) +
+  ggtitle("Distribution of Age by Gender and Geography")
+```
+
+The boxplot for age is noticeably higher among customers who have
+exited. The behaviour between the countries is similar
+
+# Random Forest
+
+Fist thing we need to do is split our data in train and test set
+
+```{r}
+set.seed(2356)
+dim<-dim(customer)
+train.idx<-sample(x=1:nrow(customer),size=floor(0.8*nrow(customer)))
+train.df<-customer[train.idx,]
+test.df<-customer[-train.idx,]
+```
+
+## Baseline Forest
+
+We are going to fit a baseline forest, and the proceed with the tuning
+
+```{r}
+forest_base<-randomForest(Exited~.,
+                          data=train.df,
+                          ntree=1000,
+                          mtry=4)
+forest_base
+```
+
+## Tuning the Forest
+
+Now it is time to tuning or forest. In this case we are going to tune
+the the number of variables to randomly sample as candidates at each
+split `mtry` of our forest
+
+```{r}
+mtry<-c(1:(ncol(customer)-1))
+```
+
+We are going to create a loop where we are going to try the different
+values for `mtry`. We are going to save the `oob_error_rate` in a new
+dataset called `keeps`
+
+```{r}
+keeps<- data.frame(
+  m= rep(NA,length(mtry)),
+  oob_error_rate=rep(NA,length(mtry))
+)
+```
+
+We are going to set a loop so we can see which value of mtry gives us
+the best result
+
+```{r }
+#loop over each element of mtry
+for(i in 1:length(mtry)){
+  print(paste0("Fitting m=",mtry[i]))
+  temp_forest<-randomForest(Exited~.,
+                            data = train.df,
+                            ntree=1000,
+                            mtry=mtry[i]) #dinamically changing mtry value
+  #record the results
+  keeps[i,"m"]<-mtry[i]
+  keeps[i,"oob_error_rate"]<-mean(predict(temp_forest)!=train.df$Exited)
+}
+```
+
+```{r}
+ggplot(data=keeps)+
+  geom_line(aes(x=m,y=oob_error_rate))+
+  scale_x_continuous(breaks=c(1:length(mtry)))
+```
+
+The best value for m is
+`r subset(keeps, oob_error_rate == min(oob_error_rate))$m`with an
+obb_value of `r min(keeps$oob_error_rate)`
+
+Now we are going to set our final forest
+
+```{r}
+final_forest<-randomForest(Exited~.,
+                           data=train.df,
+                           ntree=1000,
+                           mtry=subset(keeps, oob_error_rate == min(oob_error_rate))$m,
+                           importance=TRUE) #based on tuning excercise
+
+final_forest
+```
+
+```{r warning=FALSE}
+# Calculate predicted probabilities ('pi_hat') using the 'final_forest' model
+pi_hat <- predict(final_forest, test.df, type = 'prob')[, '1']
+
+# Create an ROC curve using the 'pROC' package
+rocCurve <- roc(response = test.df$Exited,
+                predictor = pi_hat,
+                levels = c("0", "1"))
+
+# Plot the ROC curve with additional information
+plot(rocCurve, print.thres = TRUE, print.auc = TRUE)
+
+```
+
+Based on our ROC curve, the pi\* for prediction should
+`r coords(rocCurve,"best",ret="threshold")$threshold`
+
+```{r}
+# Calculate the threshold for classification based on ROC curve
+pi_star <- coords(rocCurve, "best", ret = "threshold")$threshold
+
+# Add a new column 'forest_pred' to 'test.df' based on the threshold
+# If 'pi_hat' is greater than 'pi_star', set to 1, else set to 0
+test.df$forest_pred <- ifelse(pi_hat > pi_star, 1, 0)
+
+head(test.df)
+```
+
+# Logistic Model
+
+We decided to usea logistic model because we have a binary target variable `Exited`, so we have a Bernoulli distribution where the response for our Y variables is 1 or 0.
+```{r}
+# Add a new column 'Exited_bin' to 'customer'
+# If 'Exited' is equal to 1, set 'Exited_bin' to 1; otherwise, set to 0
+customer$Exited_numeric <- ifelse(customer$Exited == 1, 1, 0)
+customer$IsActiveMember<-as.factor(customer$IsActiveMember)
+customer$HasCrCard<-as.factor(customer$HasCrCard)
+head(customer)
+```
+
+```{r}
+# Create a data frame containing variable importance values
+vi <- as.data.frame(varImpPlot(final_forest, type = 1))
+
+# Add a column 'Variable' to store variable names
+vi$Variable <- rownames(vi)
+
+# Create a bar plot of variable importance with ggplot2
+ggplot(data = vi) +
+  geom_bar(aes(x = reorder(Variable, MeanDecreaseAccuracy), weight = MeanDecreaseAccuracy),
+           position = "identity") +
+  
+  # Flip the coordinates for a horizontal bar plot
+  coord_flip() +
+  
+  # Label the axes
+  labs(x = "Variable Name", y = "Importance")+
+   # Add a title to the graph
+  ggtitle("Variable Importance Analysis")
+
+
+```
+
+```{r}
+# Arrange the 'vi' data frame in descending order based on 'MeanDecreaseAccuracy'
+# Select only the 'Variable' column
+variables <- vi %>% 
+  arrange(desc(MeanDecreaseAccuracy)) %>% 
+  dplyr::select(Variable)
+
+variables
+```
+
+We create a new data frame in order to save the AIC and the BIC of the
+models we are going to create
+
+```{r echo=FALSE}
+results<-data.frame()
+```
+
+We create a function in order to fit a logistic model with a log link.
+
+```{r}
+# Function to fit a logistic regression model and calculate AIC, BIC
+# Arguments:
+#   - data: DataFrame containing the dataset
+#   - variables: Vector of predictor variables for the logistic regression
+fitting_model <- function(data, variables) {
+  
+  # Construct the formula for logistic regression
+  formula <- as.formula(paste("Exited_numeric ~", paste(variables, collapse = "+")))
+  
+  # Fit the logistic regression model
+  model <- glm(formula, 
+                data = data, 
+                family = binomial(link = "logit"))  # Specify binomial family and logit link function
+  
+  # Calculate AIC and BIC
+  aic <- AIC(model)
+  bic <- BIC(model)
+  
+  # Create a summary vector with relevant information
+  final <- c(num_variables = length(variables),
+             AIC = round(aic, 2),
+             BIC = round(bic, 2),
+             Variables = paste(variables, collapse = ", " ))
+  
+  # Return the summary vector
+  return(final)
+}
+```
+
+```{r}
+# Loop through each row of the 'variables' data frame
+for (i in 1:nrow(variables)) {
+  
+  # Select the first i columns from the 'variables' data frame
+  columns <- variables[1:i, ]
+  
+  # Call the fitting_model function to fit a logistic regression model
+  metrics <- fitting_model(customer, columns)
+  
+  # Create a data frame with the results and append it to the 'results' data frame
+  results <- data.frame(rbind(results, metrics))
+  
+}
+```
+
+```{r echo=FALSE}
+#We change the column names of the new data set for a better understanding
+colnames(results) <- c("Num_variables", "AIC", "BIC", "Variables")
+# change data type for graphing it 
+results$Num_variables<-as.numeric(results$Num_variables) 
+results$AIC<- as.numeric(results$AIC)
+results$BIC<-as.numeric(results$BIC)
+results
+```
+
+Final Plot
+
+```{r}
+
+ggplot(data = results) +
+  geom_point(aes(x = Num_variables, y = AIC, fill = "AIC"), shape = 21, color = "black") +
+  geom_line(aes(x = Num_variables, y = AIC, group = 1, color = "AIC"), linetype = "solid") +
+  geom_point(aes(x = Num_variables, y = BIC, fill = "BIC"), shape = 21, color = "black") +
+  geom_line(aes(x = Num_variables, y = BIC, group = 1, color = "BIC"), linetype = "solid") +
+  scale_fill_viridis_d(option = "plasma") +
+  scale_color_viridis_d(option = "plasma") +
+  labs(title = "AIC and BIC comparition",
+       x = "Number of variables",
+       y = "Value") +
+  scale_x_continuous(breaks = seq(1, 10, 1)) +
+  theme_minimal()
+
+```
+
+```{r}
+results%>%arrange(AIC,BIC)
+```
+
+Based on our graph we will take the model that has as independent
+variables the following:
+*`r results$Variables[results$Num_variables==6]`*. With this, we can run
+our final GLM model
+
+```{r echo=FALSE}
+final_glm<-glm(Exited_numeric~ Age+NumOfProducts+IsActiveMember+Balance+Geography+Gender,
+               data=customer,
+               family=binomial(link = "logit"))
+final_glm
+```
+
+# GLM Insights
+
+```{r echo=FALSE}
+summary(final_glm)
+```
+
+With our final model called `final_glm` we can do the following
+statements about our target variable:
+
+-   **Age**: If we have customers with similar characteristics, for a
+    year of increase in the customer age, the odds of the customer to
+    exit the bank change by a factor of `r exp(coef(final_glm)["Age"])`
+    which is the exponential of the Age Coefficient
+    `r coef(final_glm)["Age"]`
+
+-   **NumOfProducts**: If we have customers with similar
+    characteristics, for every increase in the number of products the
+    customer has, the odds of the customer to exit the bank change by a
+    factor of `r exp(coef(final_glm)["NumOfProducts"])` which is the
+    exponential of the Age Coefficient
+    `r coef(final_glm)["NumOfProducts"]`
+
+-   **IsActiveMember**: If we have customers with similar
+    characteristics, if the customer is an active member, the odds of
+    the customer to exit the bank change by a factor of
+    `r exp(coef(final_glm)["IsActiveMember1"])` which is the exponential
+    of the Age Coefficient `r coef(final_glm)["IsActiveMember1"]`. In
+    case the customer is not active, the odds change by a factor of
+    `r exp(-(coef(final_glm)["IsActiveMember1"]))`
+
+-   **Balance**: If we have customers with similar characteristics, an
+    increase in 1000 dollars in dollars, the odds of the customer to
+    exit the bank change by a factor of
+    `r exp(1000*coef(final_glm)["Balance"])` which is the exponential of
+    the Age Coefficient 1000  X `r coef(final_glm)["Balance"]`
+
+-   **Geography**: If we have customers with similar characteristics, a
+    customer that is from Germany, the odds of exiting are
+     `r exp(coef(final_glm)["GeographyGermany"])`times than a customer
+    that is from France and  
+     `r exp(coef(final_glm)["GeographyGermany"]- coef(final_glm)["GeographySpain"])`
+    times than a customer that is from Spain. In case with an spanish
+    customer, the odds of exting change by a factor of
+     `r exp(coef(final_glm)["GeographySpain"])` compared to one that is from France
+    
+-   **GenderMale**: If we have customers with similar
+    characteristics, if the customer is an active member, the odds of
+    the customer to exit the bank change by a factor of
+    `r exp(coef(final_glm)["GenderMale"])` which is the exponential
+    of the Age Coefficient `r coef(final_glm)["GenderMale"]`. In
+    case the customer is not male, the odds change by a factor of
+    `r exp(-(coef(final_glm)["GenderMale"]))`
+
+```{r warning=FALSE, echo=FALSE}
+confidence_intervals<-confint(final_glm,level=0.95)
+confidence_intervals<-as.data.frame(confidence_intervals)
+confidence_intervals<-data.frame(Variable = rownames(confidence_intervals),
+  Lower_CI = confidence_intervals[, 1],
+  Upper_CI = confidence_intervals[, 2]
+)
+confidence_intervals_exp<-confidence_intervals
+confidence_intervals_exp$Lower_CI<-exp(confidence_intervals_exp$Lower_CI)
+confidence_intervals_exp$Upper_CI<-exp(confidence_intervals_exp$Upper_CI)
+confidence_intervals_exp
+```
+-   **Confidence Intervals:**
+    -   **Age:** In the best case scenario, the odds change by a factor of `r round(exp(confidence_intervals[confidence_intervals$Variable == "Age", "Upper_CI"]), 3)`, and in the worst case scenario, the odds change by a factor of `r round(exp(confidence_intervals[confidence_intervals$Variable == "Age", "Lower_CI"]), 3)`. 
+
+    -   **NumOfProducts:** In the best case scenario, the odds change by a factor of `r round(exp(confidence_intervals[confidence_intervals$Variable == "NumOfProducts", "Upper_CI"]), 3)`, and in the worst case scenario, the odds change by a factor of `r round(exp(confidence_intervals[confidence_intervals$Variable == "NumOfProducts", "Lower_CI"]), 3)`.
+
+    -   **IsActiveMember:** In the best case scenario, the odds change by a factor of `r round(exp(confidence_intervals[confidence_intervals$Variable == "IsActiveMember1", "Upper_CI"]), 3)`, and in the worst case scenario, the odds change by a factor of `r round(exp(confidence_intervals[confidence_intervals$Variable == "IsActiveMember1", "Lower_CI"]), 3)`. In case the customer is not active, the odds change by a factor of `r round(exp(-confidence_intervals[confidence_intervals$Variable == "IsActiveMember1", "Lower_CI"]), 3)`in best case scenario and `r round(exp(-confidence_intervals[confidence_intervals$Variable == "IsActiveMember1", "Upper_CI"]), 3)` in the best scenario. 
+
+    -   **Balance:** In the best case scenario, the odds change by a factor of `r round(exp(1000 * confidence_intervals[confidence_intervals$Variable == "Balance", "Upper_CI"]), 3)`, and in the worst case scenario, the odds change by a factor of `r round(exp(1000 * confidence_intervals[confidence_intervals$Variable == "Balance", "Lower_CI"]), 3)`.
+
+    -   **Geography:** In the best case scenario, the odds change by a factor of  `r round(exp(confidence_intervals[confidence_intervals$Variable == "GeographyGermany", "Upper_CI"]), 3)` times for a customer from Germany compared to France, and  `r round(exp(confidence_intervals[confidence_intervals$Variable == "GeographyGermany", "Upper_CI"] - confidence_intervals[confidence_intervals$Variable == "GeographySpain", "Lower_CI"]), 3)` times compared to Spain. In the worst case scenario, for a customer from Spain, the odds of exiting change by a factor of `r round(exp(confidence_intervals[confidence_intervals$Variable == "GeographySpain", "Lower_CI"]), 3)` compared to one that comes from France. 
+    
+    -   **GenderMale:** In the best case scenario, the odds change by a factor of `r round(exp(confidence_intervals[confidence_intervals$Variable == "GenderMale", "Upper_CI"]), 3)`, and in the worst case scenario, the odds change by a factor of `r round(exp(confidence_intervals[confidence_intervals$Variable == "GenderMale", "Lower_CI"]), 3)`. In case the customer is not male, the odds change by a factor of `r round(exp(-confidence_intervals[confidence_intervals$Variable == "GenderMale", "Lower_CI"]), 3)` in the worst case scenario and the best case scenario `r round(exp(-confidence_intervals[confidence_intervals$Variable == "GenderMale", "Upper_CI"]), 3)` .
